@@ -1,0 +1,10 @@
+services:
+  birthdaybot:
+    build: .
+    container_name: birthdaybot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_PATH: /app/data/birthdays.db
+    volumes:
+      - ./data:/app/data
