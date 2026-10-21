@@ -62,7 +62,23 @@ class Divider:
     pass
 
 
-Block = Union[Heading, Para, Quote, Table, Footer, Divider]
+@dataclass
+class Pre:
+    text: str                 # plain text, моноширинный блок
+    max_rich: int = 20000     # лимит rich-сообщения — 32768 символов
+    max_classic: int = 3300   # лимит обычного сообщения — 4096
+
+
+def _tail(text: str, limit: int) -> str:
+    """Обрезает начало, оставляя самое свежее (конец)."""
+    if len(text) <= limit:
+        return text
+    cut = text[len(text) - limit:]
+    nl = cut.find("\n")
+    return "…\n" + (cut[nl + 1:] if 0 <= nl < 200 else cut)
+
+
+Block = Union[Heading, Para, Quote, Table, Footer, Divider, Pre]
 
 STYLES = {"primary", "success", "danger", "link"}
 
@@ -114,6 +130,8 @@ def render_rich(screen: Screen) -> str:
             out.append(f"<footer>{esc(b.text)}</footer>")
         elif isinstance(b, Divider):
             out.append("<hr/>")
+        elif isinstance(b, Pre):
+            out.append(f"<pre>{esc(_tail(b.text, b.max_rich))}</pre>")
         elif isinstance(b, Table):
             out.append(_rich_table(b))
     for row in screen.buttons:
@@ -166,6 +184,8 @@ def render_classic(screen: Screen) -> tuple[str, Optional[dict]]:
             out.append(f"<i>{esc(b.text)}</i>")
         elif isinstance(b, Divider):
             out.append("—————")
+        elif isinstance(b, Pre):
+            out.append(f"<pre>{esc(_tail(b.text, b.max_classic))}</pre>")
         elif isinstance(b, Table):
             out.append(_classic_table(b))
     text = "\n\n".join(out)

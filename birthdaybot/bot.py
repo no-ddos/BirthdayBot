@@ -15,6 +15,7 @@ from .dates import (
     MINUTES_IN_DAY, BirthDate, format_offset, next_birthday, parse_birth_date, parse_offset, parse_price, parse_time_of_day,
 )
 from .db import Database, Person, Session
+from .logs import current_log_path, tail_records, total_size
 from .scheduler import ReminderScheduler
 from .telegram import TelegramAPI, TelegramError
 from .ui import Renderer, Screen, esc
@@ -29,7 +30,7 @@ COMMANDS = [
     ("cancel", "Отменить ввод"),
     ("help", "Помощь"),
 ]
-DEV_COMMANDS = COMMANDS + [("test_alert", "Тестовое напоминание")]
+DEV_COMMANDS = COMMANDS + [("test_alert", "Тестовое напоминание"), ("logs", "Логи бота")]
 
 MAX_NAME = 100
 MAX_GIFT = 300
@@ -162,6 +163,12 @@ class BirthdayBot:
             else:
                 await self.send_test_alert(chat_id)
                 screen = self.menu_screen(uid, "🧪 Тестовое напоминание отправлено.")
+        elif cmd == "logs":
+            if not self.cfg.is_dev(uid):
+                log.warning("Пользователь %s (не DEV_ADMIN) пытался открыть логи", uid)
+                screen = self.menu_screen(uid, "⛔ Логи доступны только DEV_ADMIN.")
+            else:
+                screen = self.logs_screen("all", 20)
         else:
             screen = self.menu_screen(uid, f"Неизвестная команда /{esc(cmd)}")
         await self.show(uid, chat_id, sess, screen, new=True)
@@ -266,6 +273,16 @@ class BirthdayBot:
         elif head == "tq":
             sess.state, sess.data = "remind_at", {}
             screen = self.apply_remind_at(sess, arg)
+        elif head in ("lg", "lgd"):
+            if not self.cfg.is_dev(uid):
+                log.warning("Пользователь %s (не DEV_ADMIN) пытался открыть логи", uid)
+                await self.api.answer_callback(cq["id"], "⛔ Только для DEV_ADMIN", show_alert=True)
+                return
+            if head == "lg":
+                level, _, cnt = arg.partition(":")
+                screen = self.logs_screen(level, _int(cnt))
+            else:
+                toast = await self.send_log_file(chat_id)
         elif head == "t":
             if self.cfg.is_dev(uid):
                 await self.send_test_alert(chat_id)
@@ -410,6 +427,34 @@ class BirthdayBot:
         bday = next_birthday(p.day, p.month, today)
         offs = self.db.list_offsets() or [MINUTES_IN_DAY]
         await self.ui.send(chat_id, screens.reminder(p, bday, offs[-1], self.now(), test=True))
+
+    # -- логи (только DEV_ADMIN) ---------------------------------------------
+    def logs_screen(self, level: str, count: int) -> Screen:
+        if level not in screens.LOG_LEVEL_LABELS:
+            level = "all"
+        if count not in screens.LOG_COUNTS:
+            count = 20
+        path = current_log_path()
+        if path is None or not path.exists():
+            return screens.logs_screen([], level, count, file_name=None, size_total=0,
+                                       max_mb=self.cfg.log_max_mb, enabled=False)
+        return screens.logs_screen(tail_records(path, count, level), level, count,
+                                   file_name=str(path), size_total=total_size(path),
+                                   max_mb=self.cfg.log_max_mb, enabled=True)
+
+    async def send_log_file(self, chat_id: int) -> str:
+        path = current_log_path()
+        if path is None or not path.exists():
+            return "Файл логов не найден"
+        for h in logging.getLogger().handlers:
+            h.flush()
+        try:
+            await self.api.send_document(chat_id, str(path), filename=path.name,
+                                         caption=f"📜 {path.name} · {path.stat().st_size // 1024} КБ")
+        except (TelegramError, httpx.HTTPError, OSError) as e:
+            log.warning("Не удалось отправить лог: %s", e)
+            return "Не удалось отправить файл"
+        return "📥 Файл отправлен"
 
     # -- вспомогательное -----------------------------------------------------
     def menu_screen(self, uid: int, notice: Optional[str] = None) -> Screen:

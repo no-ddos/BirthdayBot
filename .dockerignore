@@ -1,5 +1,6 @@
 .env
 data/
+logs/
 .venv/
 venv/
 .git/

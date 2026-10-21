@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Optional
 
 import httpx
@@ -115,6 +116,23 @@ class TelegramAPI:
         await self.call("setMyCommands",
                         commands=[{"command": c, "description": d} for c, d in commands],
                         scope=scope)
+
+    async def send_document(self, chat_id: int, path: str, filename: Optional[str] = None,
+                            caption: Optional[str] = None) -> dict:
+        """sendDocument (multipart): отправка файла, например текущего лога."""
+        with open(path, "rb") as fh:
+            content = fh.read()
+        data = {"chat_id": str(chat_id)}
+        if caption:
+            data["caption"] = caption
+        resp = await self._client.post(self._url + "sendDocument", data=data,
+                                       files={"document": (filename or os.path.basename(path), content,
+                                                           "text/plain")})
+        body = resp.json()
+        if not body.get("ok"):
+            raise TelegramError("sendDocument", int(body.get("error_code", resp.status_code)),
+                                body.get("description", ""))
+        return body["result"]
 
     async def get_me(self) -> dict:
         return await self.call("getMe")

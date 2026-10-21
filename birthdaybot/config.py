@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
@@ -43,6 +44,9 @@ class Config:
     log_level: str = "INFO"
     default_offsets: tuple[int, ...] = field(default=(7 * 1440, 1440))
     default_remind_at: str = "09:00"
+    log_dir: Optional[Path] = None     # None — только консоль
+    log_max_mb: int = 100              # суммарный лимит всех файлов логов
+    log_files: int = 10                # на сколько файлов делится лимит (ротация)
 
     @property
     def all_admins(self) -> frozenset[int]:
@@ -77,6 +81,16 @@ def load_config(env_file: str | os.PathLike | None = None, require_token: bool =
     if rich_mode not in {"auto", "on", "off"}:
         raise SystemExit("RICH_MODE должен быть auto, on или off")
 
+    log_dir_raw = _get("LOG_DIR", default="logs")
+    log_dir = None if log_dir_raw.lower() in {"-", "off", "none", "false", "0"} else Path(log_dir_raw)
+    try:
+        log_max_mb = int(_get("LOG_MAX_MB", default="100"))
+        log_files = int(_get("LOG_FILES", default="10"))
+    except ValueError:
+        raise SystemExit("LOG_MAX_MB и LOG_FILES должны быть целыми числами") from None
+    if log_max_mb < 1 or not 1 <= log_files <= 100:
+        raise SystemExit("LOG_MAX_MB должен быть >= 1, LOG_FILES — от 1 до 100")
+
     return Config(
         bot_token=token,
         dev_admins=dev_admins,
@@ -87,4 +101,7 @@ def load_config(env_file: str | os.PathLike | None = None, require_token: bool =
         api_base=_get("TELEGRAM_API_BASE", default="https://api.telegram.org").rstrip("/"),
         log_level=_get("LOG_LEVEL", default="INFO").upper(),
         default_remind_at=_get("REMIND_AT", default="09:00"),
+        log_dir=log_dir,
+        log_max_mb=log_max_mb,
+        log_files=log_files,
     )

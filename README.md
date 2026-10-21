@@ -17,13 +17,17 @@ Telegram-бот для удобного отслеживания дней рож
   (`7d`, `3d`, `1d 12h`, `3h`, `30m`, `0` — в сам день; можно `7д`, `3ч`, `30м`), время отправки (по умолчанию 09:00).
 - 🔐 **Доступ только админам** из `.env`; остальных бот молча игнорирует. Работает только в личных сообщениях.
 - 🧪 **Тестовый алерт** — только для `DEV_ADMIN` (кнопка в меню или `/test_alert`).
+- 📜 **Логи в боте** — только для `DEV_ADMIN` (кнопка «Логи» или `/logs`): последние 20/50/100/200 записей,
+  фильтр ⚠️ WARN+ / ❌ ERROR, скачивание текущего файла логов документом.
+- 🗂 **Логи в файлах с ротацией**: общий объём не больше 100 МБ (10 файлов × 10 МБ), старые удаляются сами.
+  Токен бота в логи не попадает — маскируется как `<REDACTED>`.
 
 ### Роли
 
 | Переменная  | Права                                   |
 |-------------|-----------------------------------------|
-| `DEV_ADMIN` | всё + тестовые алерты                   |
-| `ADMIN`     | всё, кроме тестовых алертов             |
+| `DEV_ADMIN` | всё + тестовые алерты + просмотр логов  |
+| `ADMIN`     | всё, кроме тестовых алертов и логов     |
 
 Обе переменные — списки Telegram ID через запятую. Свой ID можно узнать у [@userinfobot](https://t.me/userinfobot).
 
@@ -38,7 +42,8 @@ curl -fsSL https://raw.githubusercontent.com/no-ddos/BirthdayBot/main/install.sh
 2. склонирует репозиторий в `/opt/BirthdayBot`;
 3. создаст виртуальное окружение и установит зависимости;
 4. если `.env` ещё нет — спросит `BOT_TOKEN`, `DEV_ADMIN`, `ADMIN`, часовой пояс;
-5. создаст и запустит systemd-сервис `birthdaybot` (автозапуск после перезагрузки).
+5. создаст папку логов `/var/log/birthdaybot`;
+6. создаст и запустит systemd-сервис `birthdaybot` (автозапуск после перезагрузки).
 
 Без вопросов (например, из CI):
 
@@ -52,10 +57,27 @@ curl -fsSL https://raw.githubusercontent.com/no-ddos/BirthdayBot/main/install.sh
 ```bash
 sudo bash /opt/BirthdayBot/install.sh update      # обновить до последней версии и перезапустить
 sudo bash /opt/BirthdayBot/install.sh config      # заново ввести токен/админов
-sudo bash /opt/BirthdayBot/install.sh uninstall   # удалить сервис (--purge — вместе с данными)
 sudo bash /opt/BirthdayBot/install.sh status      # статус
-sudo bash /opt/BirthdayBot/install.sh logs        # логи (journalctl -u birthdaybot -f)
+sudo bash /opt/BirthdayBot/install.sh logs        # хвост лог-файла (tail -F)
+sudo bash /opt/BirthdayBot/install.sh uninstall   # полное удаление (то же, что uninstall.sh)
 ```
+
+## Полное удаление
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/no-ddos/BirthdayBot/main/uninstall.sh | sudo bash
+```
+
+Без подтверждения: `... | sudo bash -s -- -y`. Скрипт `uninstall.sh` удаляет **всё**:
+
+- останавливает и отключает сервис `birthdaybot`, удаляет unit-файл, делает `daemon-reload`;
+- папку установки (`/opt/BirthdayBot` или путь из unit-файла / `INSTALL_DIR`) — код, venv, `.env`, базу;
+- логи (`/var/log/birthdaybot` и `LOG_DIR` из `.env`);
+- системного пользователя `birthdaybot`;
+- если бот запускался через Docker Compose — контейнер, образ, тома и папку проекта compose
+  (с `.env`, `data/`, `logs/`; оставить папку: `--keep-docker-dir`).
+
+Перед удалением показывает список и просит ввести `yes` (работает и через `curl | sudo bash`).
 
 Другая папка: `INSTALL_DIR=/srv/bbot`. Установка из уже скачанной папки: `sudo ./install.sh --here`.
 
@@ -64,10 +86,11 @@ sudo bash /opt/BirthdayBot/install.sh logs        # логи (journalctl -u birt
 ```bash
 git clone https://github.com/no-ddos/BirthdayBot.git && cd BirthdayBot
 cp .env.example .env && nano .env
+mkdir -p data logs && sudo chown 1000:1000 data logs   # контейнер работает от uid 1000
 docker compose up -d --build
 ```
 
-База хранится в `./data`.
+База хранится в `./data`, логи — в `./logs`.
 
 ## Ручной запуск (для разработки)
 
@@ -91,6 +114,9 @@ pytest                 # тесты
 | `REMIND_AT`  | `09:00`             | время напоминаний при первом запуске (дальше меняется в боте) |
 | `RICH_MODE`  | `auto`              | `auto` — rich с откатом на обычные сообщения, `on` — только rich, `off` — только обычные |
 | `LOG_LEVEL`  | `INFO`              | уровень логов |
+| `LOG_DIR`    | `logs` (`/var/log/birthdaybot` при установке скриптом) | папка лог-файлов; `off` — только консоль |
+| `LOG_MAX_MB` | `100`               | общий лимит всех лог-файлов, МБ |
+| `LOG_FILES`  | `10`                | на сколько файлов делится лимит (по умолчанию 10 × 10 МБ) |
 
 ## Как работают напоминания
 
@@ -101,6 +127,16 @@ pytest                 # тесты
   если «созрело» сразу несколько (например, 7d и 1d), придёт одно — самое актуальное.
 - 29 февраля в невисокосный год празднуется 28 февраля. Переход через Новый год учитывается.
 - Напоминание получают **все** админы из `DEV_ADMIN` и `ADMIN` (каждый должен хоть раз нажать /start у бота).
+
+## Логи
+
+- Пишутся в `LOG_DIR/birthdaybot.log` и в stdout (journald / `docker logs`).
+- Ротация `RotatingFileHandler`: `LOG_FILES` файлов по `LOG_MAX_MB / LOG_FILES` МБ
+  (`birthdaybot.log`, `birthdaybot.log.1` … `.9`). Когда текущий файл заполняется, самый старый удаляется,
+  поэтому суммарный объём никогда не превышает `LOG_MAX_MB`.
+- Токен бота вырезается из всех строк (включая трейсбеки и URL), логи `httpx` с URL запросов заглушены.
+- В боте экран **📜 Логи** доступен только `DEV_ADMIN`: обычный `ADMIN` не видит кнопку,
+  а команда `/logs` и прямые нажатия на старые кнопки ему отказывают.
 
 ## Rich Messages
 
@@ -127,8 +163,10 @@ birthdaybot/
   dates.py      даты, смещения, расчёт напоминаний
   db.py         SQLite
   config.py     загрузка .env
+  logs.py       логирование: ротация, лимит размера, маскировка токена, чтение хвоста
 tests/          pytest
-install.sh      установка/обновление/удаление на сервере
+install.sh      установка/обновление на сервере
+uninstall.sh    полное удаление
 ```
 
 ## Лицензия

@@ -6,13 +6,13 @@
 # Команды:
 #   install.sh [install]      установить (или переустановить) и запустить
 #   install.sh update         git pull + зависимости + перезапуск
-#   install.sh uninstall      удалить сервис (данные остаются; --purge — удалить всё)
+#   install.sh uninstall      ПОЛНОЕ удаление (вызывает uninstall.sh; -y — без вопросов)
 #   install.sh status|logs|restart
 #   install.sh config         заново ввести BOT_TOKEN / админов
 #
 # Опции/переменные окружения:
 #   --here                    ставить из текущей папки (без git clone)
-#   INSTALL_DIR=/opt/BirthdayBot  REPO_URL=...  BRANCH=main
+#   INSTALL_DIR=/opt/BirthdayBot  LOG_DIR=/var/log/birthdaybot  REPO_URL=...  BRANCH=main
 #   BOT_TOKEN=... DEV_ADMIN=... ADMIN=... TZ=...   — для неинтерактивной установки
 set -euo pipefail
 
@@ -22,6 +22,8 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/BirthdayBot}"
 SERVICE="birthdaybot"
 SERVICE_USER="birthdaybot"
 UNIT_FILE="/etc/systemd/system/${SERVICE}.service"
+DEFAULT_LOG_DIR="/var/log/birthdaybot"
+RAW_URL="${RAW_URL:-https://raw.githubusercontent.com/no-ddos/BirthdayBot/${BRANCH}}"
 
 c_green=$'\e[32m'; c_red=$'\e[31m'; c_yellow=$'\e[33m'; c_bold=$'\e[1m'; c_off=$'\e[0m'
 info() { echo "${c_green}==>${c_off} $*"; }
@@ -30,12 +32,12 @@ die()  { echo "${c_red}[x]${c_off} $*" >&2; exit 1; }
 
 ACTION="install"
 USE_HERE=0
-PURGE=0
+ASSUME_YES=0
 for arg in "$@"; do
   case "$arg" in
     install|update|uninstall|status|logs|restart|config) ACTION="$arg" ;;
     --here) USE_HERE=1 ;;
-    --purge) PURGE=1 ;;
+    -y|--yes|--purge) ASSUME_YES=1 ;;
     -h|--help) sed -n '2,18p' "$0" 2>/dev/null || true; exit 0 ;;
     *) die "Неизвестный аргумент: $arg" ;;
   esac
@@ -110,6 +112,7 @@ valid_ids() { [[ -z "$1" || "$1" =~ ^[0-9]+([[:space:]]*,[[:space:]]*[0-9]+)*$ ]
 write_env() {
   local env_file="$INSTALL_DIR/.env"
   local token="${BOT_TOKEN:-}" dev="${DEV_ADMIN:-}" adm="${ADMIN:-}" tz="${TZ:-Europe/Moscow}"
+  local log_dir="${LOG_DIR:-$DEFAULT_LOG_DIR}" log_max="${LOG_MAX_MB:-100}"
 
   echo
   echo "${c_bold}Настройка .env${c_off} (Telegram ID можно узнать у @userinfobot)"
@@ -138,6 +141,8 @@ DB_PATH=data/birthdays.db
 REMIND_AT=09:00
 RICH_MODE=auto
 LOG_LEVEL=INFO
+LOG_DIR=$log_dir
+LOG_MAX_MB=$log_max
 ENV
   chown "$SERVICE_USER":"$SERVICE_USER" "$env_file"
   chmod 600 "$env_file"
@@ -172,9 +177,30 @@ UNIT
   systemctl daemon-reload
 }
 
+# папка логов из .env (если в старом .env нет LOG_DIR — дописываем значение по умолчанию)
+setup_log_dir() {
+  local env_file="$INSTALL_DIR/.env" dir=""
+  if [[ -f "$env_file" ]]; then
+    dir="$(grep -E '^[[:space:]]*LOG_DIR=' "$env_file" | tail -n1 | cut -d= -f2- | tr -d '"'"'" || true)"
+    if [[ -z "$dir" ]] && ! grep -qE '^[[:space:]]*LOG_DIR=' "$env_file"; then
+      dir="${LOG_DIR:-$DEFAULT_LOG_DIR}"
+      printf 'LOG_DIR=%s\nLOG_MAX_MB=%s\n' "$dir" "${LOG_MAX_MB:-100}" >> "$env_file"
+      info "В .env добавлены LOG_DIR=$dir и LOG_MAX_MB"
+    fi
+  fi
+  dir="${dir:-$DEFAULT_LOG_DIR}"
+  case "$dir" in off|-|none|false|0) return 0 ;; esac
+  [[ "$dir" == /* ]] || dir="$INSTALL_DIR/$dir"
+  mkdir -p "$dir"
+  chown -R "$SERVICE_USER":"$SERVICE_USER" "$dir"
+  chmod 750 "$dir"
+  LOG_PATH="$dir/birthdaybot.log"
+}
+
 fix_perms() {
   mkdir -p "$INSTALL_DIR/data"
   chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR/data"
+  setup_log_dir
   [[ -f "$INSTALL_DIR/.env" ]] && chown "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR/.env" && chmod 600 "$INSTALL_DIR/.env"
   chmod o+rx "$INSTALL_DIR"
   return 0
@@ -204,9 +230,9 @@ do_install() {
   fi
   echo
   echo "  Статус:     systemctl status $SERVICE"
-  echo "  Логи:       journalctl -u $SERVICE -f"
+  echo "  Логи:       ${LOG_PATH:-journalctl -u $SERVICE -f}  (или: sudo bash $INSTALL_DIR/install.sh logs)"
   echo "  Обновить:   sudo bash $INSTALL_DIR/install.sh update"
-  echo "  Удалить:    sudo bash $INSTALL_DIR/install.sh uninstall"
+  echo "  Удалить:    sudo bash $INSTALL_DIR/uninstall.sh"
 }
 
 do_update() {
@@ -223,24 +249,36 @@ do_update() {
 
 do_uninstall() {
   need_root
-  info "Останавливаю и удаляю сервис…"
-  systemctl disable --now "$SERVICE" 2>/dev/null || true
-  rm -f "$UNIT_FILE"
-  systemctl daemon-reload
-  if [[ $PURGE -eq 0 ]]; then
-    local ans
-    ans="$(ask "Удалить также $INSTALL_DIR вместе с базой и .env? (y/N)" "N")"
-    [[ "$ans" =~ ^[YyДд] ]] && PURGE=1
-  fi
-  if [[ $PURGE -eq 1 ]]; then
-    [[ "$INSTALL_DIR" == "/" || -z "$INSTALL_DIR" ]] && die "Подозрительный INSTALL_DIR"
-    rm -rf "$INSTALL_DIR"
-    info "Удалён $INSTALL_DIR"
+  local args=()
+  [[ $ASSUME_YES -eq 1 ]] && args+=(--yes)
+  local here="" src="${BASH_SOURCE[0]:-}"
+  # при `curl | bash` у скрипта нет файла — тогда берём uninstall.sh из INSTALL_DIR или скачиваем
+  [[ -n "$src" && -f "$src" ]] && here="$(cd "$(dirname "$src")" && pwd)"
+  export INSTALL_DIR
+  if [[ -n "$here" && -f "$here/uninstall.sh" ]]; then
+    bash "$here/uninstall.sh" "${args[@]}"
+  elif [[ -f "$INSTALL_DIR/uninstall.sh" ]]; then
+    bash "$INSTALL_DIR/uninstall.sh" "${args[@]}"
   else
-    info "Код и данные оставлены в $INSTALL_DIR"
+    info "Скачиваю uninstall.sh…"
+    local tmp
+    tmp="$(mktemp)"
+    curl -fsSL "$RAW_URL/uninstall.sh" -o "$tmp" || die "Не удалось скачать $RAW_URL/uninstall.sh"
+    bash "$tmp" "${args[@]}"
+    rm -f "$tmp"
   fi
-  id "$SERVICE_USER" >/dev/null 2>&1 && userdel "$SERVICE_USER" 2>/dev/null || true
-  info "BirthdayBot удалён"
+}
+
+show_logs() {
+  local env_file="$INSTALL_DIR/.env" dir=""
+  [[ -f "$env_file" ]] && dir="$(grep -E '^[[:space:]]*LOG_DIR=' "$env_file" | tail -n1 | cut -d= -f2- | tr -d '"'"'" || true)"
+  dir="${dir:-$DEFAULT_LOG_DIR}"
+  [[ "$dir" == /* ]] || dir="$INSTALL_DIR/$dir"
+  if [[ -f "$dir/birthdaybot.log" ]]; then
+    tail -n 100 -F "$dir/birthdaybot.log"
+  else
+    journalctl -u "$SERVICE" -n 100 -f
+  fi
 }
 
 case "$ACTION" in
@@ -248,7 +286,7 @@ case "$ACTION" in
   update)    do_update ;;
   uninstall) do_uninstall ;;
   status)    systemctl status "$SERVICE" --no-pager ;;
-  logs)      journalctl -u "$SERVICE" -n 100 -f ;;
+  logs)      show_logs ;;
   restart)   need_root; systemctl restart "$SERVICE"; info "Перезапущено" ;;
   config)    need_root; ensure_user; write_env; fix_perms; systemctl restart "$SERVICE" 2>/dev/null || true ;;
 esac

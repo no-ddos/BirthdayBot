@@ -26,7 +26,8 @@ class FakeTelegram:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         method = request.url.path.rsplit("/", 1)[-1]
-        body = json.loads(request.content or b"{}")
+        ctype = request.headers.get("content-type", "")
+        body = {"_multipart": request.content} if ctype.startswith("multipart/") else json.loads(request.content or b"{}")
         self.calls.append((method, body))
         if method == "sendRichMessage" and not self.rich_supported:
             return httpx.Response(404, json={"ok": False, "error_code": 404, "description": "Not Found: method not found"})

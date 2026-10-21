@@ -10,7 +10,7 @@ from .dates import (
     format_price, next_birthday,
 )
 from .db import Person
-from .ui import Button, Footer, Heading, Para, Quote, Screen, Table, esc
+from .ui import Button, Footer, Heading, Para, Pre, Quote, Screen, Table, esc
 
 PAGE_SIZE = 10
 
@@ -63,7 +63,7 @@ def main_menu(people: list[Person], today: date, is_dev: bool, notice: Optional[
     s.row(Button("📋 Список", "l:up:0", "primary"), Button("➕ Добавить", "a", "success"))
     s.row(Button("⏰ Алерты", "al"), Button("ℹ️ Помощь", "h"))
     if is_dev:
-        s.row(Button("🧪 Тестовый алерт", "t", "danger"))
+        s.row(Button("🧪 Тестовый алерт", "t", "danger"), Button("📜 Логи", "lg:all:20"))
     return s
 
 
@@ -77,7 +77,7 @@ def help_screen(is_dev: bool) -> Screen:
         ["/add", "добавить человека"],
         ["/alerts", "настройка напоминаний"],
         ["/cancel", "отменить ввод"],
-    ] + ([["/test_alert", "тестовое напоминание (dev)"]] if is_dev else [])))
+    ] + ([["/test_alert", "тестовое напоминание (dev)"], ["/logs", "логи бота (dev)"]] if is_dev else [])))
     s.add(Para("Дата: <code>ДД.ММ.ГГГГ</code> или <code>ДД.ММ</code>, если год неизвестен. "
                "Цена: <code>1500</code>, <code>2к</code>. Алерты: <code>7d</code>, <code>1d 12h</code>, "
                "<code>3h</code>, <code>30m</code> (можно по-русски: <code>7д</code>, <code>3ч</code>)."))
@@ -307,3 +307,36 @@ def reminder(p: Person, bday: date, offset_minutes: int, now: datetime, test: bo
 
 def _month(d: date) -> str:
     return MONTHS_GEN[d.month]
+
+
+# -- логи (только DEV_ADMIN) ---------------------------------------------------
+
+LOG_LEVEL_LABELS = {"all": "Все", "warn": "⚠️ WARN+", "err": "❌ ERROR"}
+LOG_COUNTS = (20, 50, 100, 200)
+
+
+def _mb(n: int) -> str:
+    return f"{n / 1024 / 1024:.1f} МБ"
+
+
+def logs_screen(records: list[str], level: str, count: int, *, file_name: Optional[str],
+                size_total: int, max_mb: int, enabled: bool) -> Screen:
+    s = Screen()
+    s.add(Heading("📜 Логи", 2))
+    if not enabled:
+        s.add(Quote("Запись логов в файл выключена (LOG_DIR=off) или файл недоступен."))
+        s.row(BACK_MENU)
+        return s
+    s.add(Para(f"Файл: <code>{esc(file_name or '—')}</code> · занято {_mb(size_total)} из {max_mb} МБ"))
+    label = LOG_LEVEL_LABELS.get(level, level)
+    if records:
+        s.add(Pre("\n".join(records)))
+        s.add(Footer(f"Последние {len(records)} записей · фильтр: {label}"))
+    else:
+        s.add(Para(f"Записей нет (фильтр: {esc(label)})."))
+    s.row(*[Button(("✓ " if k == level else "") + v, f"lg:{k}:{count}", "primary" if k == level else None)
+            for k, v in LOG_LEVEL_LABELS.items()])
+    s.row(*[Button(("✓ " if n == count else "") + str(n), f"lg:{level}:{n}") for n in LOG_COUNTS])
+    s.row(Button("🔄 Обновить", f"lg:{level}:{count}"), Button("📥 Скачать файл", "lgd", "success"))
+    s.row(BACK_MENU)
+    return s
